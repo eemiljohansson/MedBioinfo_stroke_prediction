@@ -1,0 +1,705 @@
+---
+title: "stroke_classification"
+format: html
+---
+
+---
+title: "R Notebook"
+output:
+  word_document: default
+  html_notebook: default
+  pdf_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+# Setup
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(patchwork)
+library(pheatmap)
+library(ggbeeswarm)
+library(kernlab)
+library(ranger)
+```
+
+```{r}
+stroke_data <- read_csv("data/healthcare-dataset-stroke-data.csv")
+```
+
+```{r}
+theme_main <- theme(panel.grid.major = element_blank(), 
+                    panel.grid.minor = element_blank(),
+                    panel.spacing = unit(0.2, "lines"), 
+                    panel.background=element_rect(fill="white"),
+                    panel.border = element_blank(),
+                    plot.title = element_text(face = "bold",
+                                              size = rel(1), hjust = 0.5),
+                    plot.subtitle=element_text(face = "bold",hjust = 0.5, size=rel(1),vjust=1),
+                    axis.title = element_text(face = "bold",size = rel(1)),
+                    axis.ticks = element_line(),
+                    axis.ticks.length = unit(.25, "cm"),
+                    axis.line = element_line(size = 0.5),
+                    axis.text = element_text(size = rel(1), color = 'black'),
+                    legend.key = element_blank(),
+                    legend.position = "right",
+                    legend.text = element_text(size=rel(0.8)),
+                    legend.key.size= unit(0.7, "cm"),
+                    legend.title = element_text(size=rel(1)),
+                    plot.margin=unit(c(10,5,5,5),"mm"),
+                    strip.background=element_rect(colour="grey90",fill="grey90"),
+                    strip.text = element_text(face="bold"))
+
+theme_simple <- 
+  theme_main +
+  theme(axis.text.x = element_text(angle = 90,
+                                   vjust = 0.5,
+                                   hjust = 1),
+        strip.background = element_rect(color="white", fill="white"))
+```
+
+# Data exploration
+
+## Data transformation
+
+```{r}
+
+data_ml <- 
+  stroke_data |> 
+ # select(-ever_married, -work_type, -Residence_type, -smoking_status) |> 
+  filter( bmi != 'N/A', gender != 'Other') %>% mutate(bmi = as.numeric(bmi)) %>% 
+  mutate(across(c('gender', 'hypertension', 'heart_disease', 'stroke'), ~as.factor(.)),
+         across(where(is.character), as.factor)) |>
+  na.omit() 
+
+
+# Viewing the data
+#data_ml |> glimpse()
+#data_ml |> head()
+#data_ml |> summary()
+
+
+```
+
+## Checking data
+
+As we can see in the box plots below, a wide range of people have been included in this data, from nearly newborn and almost 0 in BMI to a reasonable age of 80 and BMI of almost 40. 
+
+```{r}
+data_ml |>
+  pivot_longer(cols = c(age, avg_glucose_level, bmi), names_to = "Variable", values_to = "Value") |>
+  ggplot(aes(x = Variable, y = Value)) +
+ # geom_quasirandom(alpha = 0.5, size = 1, show.legend = TRUE) +
+  geom_boxplot(fill = NA, color = "black", outlier.colour = NA) +
+  facet_wrap(~Variable, ncol = 3, scales = "free") +
+  labs(title = "Boxplots of Numerical Columns",
+       x = "Variable",
+       y = "Value") +
+  theme_simple +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5))
+
+
+
+```
+
+## Continuous variables
+
+```{r}
+
+continuous <- 
+  data_ml |>
+  pivot_longer(cols = c(age, avg_glucose_level, bmi), names_to = "Variable", values_to = "Value") |>
+  mutate(stroke = recode(stroke,
+                         `0` = "No",
+                         `1` = "Yes")) |> 
+  ggplot(aes(Value, fill = stroke)) +
+  geom_density(alpha = 0.5) +
+  theme_simple +
+  scale_fill_manual(values  = c("grey", "#860051")) +
+  facet_wrap(~Variable, scales = "free")
+
+ggsave("results/conttinuous_variables_distribution.png", h = 3, w = 6)
+```
+
+## Categorical variables
+
+```{r}
+# Categorical binary (hypertension, heart_disease, ever_married, gender)
+categorical <- 
+  data_ml |>
+  pivot_longer(cols = c(hypertension, heart_disease, ever_married, gender,work_type, Residence_type, smoking_status), names_to = "Variable", values_to = "Value") |>
+  mutate(Value = recode(Value,
+                        `1` = "Yes",
+                        `0` = "No"),
+         stroke = recode(stroke,
+                         `0` = "No",
+                         `1` = "Yes"),
+         Variable = recode(Variable,
+                           `ever_married` = "Married",
+                           `gender` = "Sex",
+                           `heart_disease` = "Heart disease",
+                           `hypertension` = "Hypertension",
+                           `Residence_type` = "Residence",
+                           `smoking_status` = "Smoking_status",
+                           `work_type` = "Work")) |> 
+  group_by(Variable, Value, stroke) |> 
+  summarise(n = n()) |> 
+  ggplot(aes(Value, n, fill = stroke)) +
+  geom_col() +
+  scale_fill_manual(values  = c("grey", "#860051")) +
+  facet_grid(~Variable, scales = "free", space = "free") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+        strip.text.x = element_text(face = "bold",
+                                    size = 6),
+        panel.grid = element_blank(),
+        axis.text = element_text(color = "black"),
+        axis.title = element_text(face = "bold")) +
+  labs(x = "", y = "Number of samples")
+
+ggsave("results/categorical_variables_barplot.png", h = 4, w = 8)
+
+continuous / categorical
+ggsave("results/all_variables_plot.png", h = 6, w = 8)
+
+
+```
+
+We can visualize in the scatter plot below that stroke is more common in the second half of the studied population (0-80y) and those younger tend to have a higher BMI, however, we can't confirm here whether it is significant correlated or not.
+
+```{r}
+data_ml %>%
+  ggplot(aes(x = avg_glucose_level, y = age, color = gender, size = bmi)) +
+  geom_point(alpha = 0.5) +
+  facet_wrap(~stroke) +
+  theme_simple
+```
+
+In this other scatter plot we see the distribution of our study group based on age and how many of that age we have included. We see the scarcity of those with stroke in comparison to those who did not have one. The almost all of confirmed strokes are >40y.
+
+```{r}
+# Create a summary of age and stroke counts
+age_stroke_counts <- data_ml %>%
+  group_by(age, stroke) %>%
+  summarise(Count = n()) 
+
+# Create a scatter plot using ggplot2
+ggplot(age_stroke_counts, aes(x = age, y = Count, color = stroke, size = Count)) +
+  geom_point(alpha = 0.5) +
+  labs(title = "Distribution of Stroke Across Age Groups",
+       x = "Age",
+       y = "Count",
+       color = "Stroke") +
+  scale_color_manual(values = c("#252E6C", "#BC3030")) +
+  theme_simple
+```
+
+## Check correlation
+
+```{r}
+cor_numeric_features <- 
+  data_ml |> 
+  select_if(is.numeric) |> 
+  select(-id) |> 
+  scale() |> 
+  cor()
+
+cor_numeric_features |> 
+  pheatmap()
+```
+
+# ML
+
+## Data split
+
+```{r}
+
+# Random undersampling due to imbalance
+set.seed(4)
+balanced_dataset <- data_ml %>%
+  group_by(stroke) %>%
+  slice_sample(n = min(count(data_ml, stroke)$n))
+
+
+#changed split set to 0.8 because small training set
+stroke_split <- 
+  balanced_dataset |> 
+  initial_split(prop = 0.8, strata = stroke)
+stroke_split
+
+stroke_train <- training(stroke_split)
+stroke_test <- testing(stroke_split)
+
+set.seed(1354)
+
+# cross validation
+### changed cross validation to 5, due to small training set
+stroke_folds <- vfold_cv(stroke_train, v = 10, strata = stroke)
+
+```
+
+## General recipe
+
+```{r}
+
+stroke_rec <- 
+  recipe(stroke ~ ., data = stroke_train) |>
+  update_role(id, new_role = "ID") |> 
+  step_dummy(all_nominal(), -all_outcomes()) |>
+ # step_nzv(all_predictors(), freq_cut = 0) |> # non zero variance filter, helped alot for svm
+  step_normalize(all_numeric_predictors()) 
+
+# Explore baked data
+stroke_baked <- bake(prep(stroke_rec), new_data = stroke_train)
+
+```
+
+## SVM
+
+### SVM with Polynomial function 
+
+```{r}
+# Create svm model with Polynomial function kernel
+svm_spec <- svm_poly(cost = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("kernlab")
+
+# Define the workflow
+svm_wf <- workflow() %>%
+  add_recipe(stroke_rec) %>%
+  add_model(svm_spec)
+
+set.seed(1354)
+# Tune the model with resampling and optimization for specific metrics
+svm_tune <- tune_grid(
+  object = svm_wf,
+  resamples = stroke_folds,
+  grid = 25,  # Number of hyperparameter combinations to try
+ # control = control_resamples(save_pred = TRUE)
+ metrics = metric_set(roc_auc, sens, spec)
+)
+
+show_best(svm_tune, metric = "roc_auc")
+
+# Select SVM with best hyperparameters
+best_svm <- select_best(svm_tune,metric = c('roc_auc'))
+
+# Fit final model
+svm_wf <- svm_wf %>%
+  finalize_workflow(best_svm) 
+
+final_svm_fit <- last_fit(svm_wf, stroke_split, metrics = metric_set(roc_auc, sens, spec))
+
+svm_res <- 
+  final_svm_fit |> 
+  collect_predictions()
+
+# Explore performance
+final_svm_fit |> 
+  collect_metrics() 
+
+final_svm_fit |> 
+  collect_predictions() |> 
+  mutate(stroke = factor(stroke, levels = c("1", "0"))) |> 
+  roc_auc(stroke, `.pred_1`) 
+
+final_svm_fit |> 
+  collect_predictions()  |> 
+  conf_mat(estimate =.pred_class, truth = stroke)
+```
+
+```{r}
+library(vip)
+set.seed(345)
+
+
+set.seed(1354)
+svm_importance <- 
+  final_svm_fit %>%
+  extract_fit_parsnip() %>% 
+   vi(method = 'permute', nsim = 10,
+     target = 'stroke', metric = roc_auc_vec, reference_class = '0', 
+     pred_wrapper = function(object, newdata) as.numeric(unlist(predict(object, newdata))),
+     train = stroke_baked,
+     smaller_is_better = FALSE
+  ) %>% 
+  filter(Variable != "id") |> 
+    mutate(Sign = case_when(Importance > 0 ~ "POS", 
+                            Importance < 0 ~ "NEG",
+                            T ~ ""),
+           Importance = abs(Importance)) |> 
+    arrange(-Importance) 
+  
+```
+ 
+SVM based on polynomial function kernel has higher roc_auc (0.86 vs 0.83)  (Not shown, but SVM based on linear kernel, gives the same exact result as SVM based on polynomial)
+
+## Logistic Regression
+
+### Model specifications
+
+The second model is an extension of the glm model created above and is commonly refered to as elastic net logistic regression. This algorithm adds regularision to combine ridge and lasso regression, which ultimately control the size of the model. This method has two hyperparameters “penalty” and “mixture”, meaning an additional step in the process is required.
+
+```{r}
+log_model <- 
+  logistic_reg(mode = "classification", # Defining a generalized linear model for binary outcomes.
+               penalty = tune(),
+               mixture = tune()) |>
+  set_engine("glmnet", importance = "impurity", num.threads = cores)
+
+log_wf <- 
+  workflow() |> 
+  add_model(log_model) |>
+  add_recipe(stroke_rec) 
+log_wf
+```
+
+### Model tuning
+
+Next, we will do hyperparameter tuning, it is here that we will apply our cross-validation on the training data and look for the best parameters for our model. It helps us prevent overfitting.
+
+```{r}
+# Hyper-parameter tuning
+#eval_metrics <- metric_set(roc_auc, accuracy, sensitivity, specificity)
+eval_metrics <- metric_set(roc_auc, accuracy, sens, spec)
+
+set.seed(1354)
+log_results <-
+  log_wf %>% 
+  tune_grid(resamples = stroke_folds,
+            grid = 25,
+            metrics = eval_metrics)
+
+# Explore results and select the best performing hyper-parameter combination
+#autoplot(log_results)
+
+best_log <- 
+  log_results %>%
+  select_best(metric = "roc_auc") |>
+  select(-.config)
+
+# Fit final model
+log_wf <- 
+  log_wf %>%
+  finalize_workflow(best_log)
+
+final_log_fit <- last_fit(log_wf, stroke_split, metrics = eval_metrics)
+
+```
+
+### Model performance
+
+```{r}
+# Explore performance
+final_log_fit |>
+  collect_metrics()
+
+final_log_fit |>
+  collect_predictions() |>
+  mutate(stroke = factor(stroke, level = c("1", "0"))) |>
+  roc_auc(stroke, `.pred_1`)
+
+final_log_fit |>
+  collect_predictions() |>
+  conf_mat(estimate = .pred_class, truth = stroke)
+
+# Explore important variables
+log_importance <- 
+  final_log_fit |>
+  extract_fit_parsnip() |>
+  vip::vi() |>
+  arrange(-Importance) |>
+  filter(Importance > 0)
+
+log_res <- 
+  final_log_fit |> 
+  collect_predictions() 
+
+```
+
+## RF
+
+### Model specifications
+
+```{r}
+cores <- parallel::detectCores()
+
+rf_specs <-
+  rand_forest() |>
+  set_mode("classification") |>
+  set_engine("ranger", importance = "impurity", num.threads = cores) |>
+  set_args(mtry = tune(), 
+           min_n = tune(), 
+           trees = 1000) 
+
+# Set up random forest workflow
+rf_wflow <-
+  workflow() |> 
+  add_recipe(stroke_rec) |> 
+  add_model(rf_specs) 
+```
+
+### Model tuning
+
+```{r}
+# Explore number of predictors retained when preprocessing
+stroke_baked <- bake(prep(stroke_rec), new_data = stroke_train)
+
+# Hyperparameter tuning
+#eval_metrics <- metric_set(roc_auc, accuracy, sensitivity, specificity)
+eval_metrics <- metric_set(roc_auc, accuracy, sens, spec)
+
+
+
+set.seed(123)
+rf_res <- 
+  rf_wflow %>% 
+  tune_grid(stroke_folds,
+            grid = 25,
+            metrics = eval_metrics)
+
+# Explore results and select the best performing hyperparameter combination
+autoplot(rf_res)
+
+best_rf <- 
+  select_best(rf_res, metric = "roc_auc") |> 
+  select(-.config)
+
+# Fit final model
+rf_wflow <- 
+  rf_wflow |>  
+  finalize_workflow(best_rf)
+
+final_rf_fit <- last_fit(rf_wflow, stroke_split, metrics = eval_metrics) 
+```
+
+### Model performance
+
+```{r}
+# Explore performance
+final_rf_fit |> 
+  collect_metrics() 
+
+final_rf_fit |> 
+  collect_predictions() |> 
+  mutate(stroke = factor(stroke, levels = c("1", "0"))) |> 
+  roc_auc(stroke, `.pred_1`) 
+
+final_rf_fit |> 
+  collect_predictions()  |> 
+  conf_mat(estimate =.pred_class, truth = stroke)
+
+# Explore important variables
+rf_importance <- 
+  final_rf_fit  |> 
+  extract_fit_parsnip() |> 
+  vip::vi() |> 
+  arrange(-Importance) |> 
+  filter(Importance > 0)
+
+rf_res <- 
+  final_rf_fit |> 
+  collect_predictions() 
+
+```
+
+# Comparison
+
+Suggestions:
+1. Plot the ROC curves together and add AUC as a legend
+2. Plot the Confusion matrices
+3. Show the F1 score
+4. Plot the different feature selections
+
+```{r}
+# Here are two ways to plot the individual ROC curve
+
+# Plot ROC curve
+final_log_fit |>
+  collect_predictions() |>
+  roc_curve(stroke, .pred_0) |>
+  autoplot() +
+  theme_simple
+
+# Another way of doing it with ggplot2
+roc_curve(svm_res, stroke, .pred_0) |> # why .pred_0???
+  ggplot(aes(x = 1 - specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  theme_simple +
+  geom_text(aes(0.75, 0.25, label = paste0("AUC: ", round(svm_res |> roc_auc(stroke, .pred_0) |> pull(`.estimate`), 3)))) +
+  ggtitle("Support vector machine") |
+
+roc_curve(log_res, stroke, .pred_0) |> # why .pred_0???
+  ggplot(aes(x = 1 - specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  theme_simple +
+  geom_text(aes(0.75, 0.25, label = paste0("AUC: ", round(log_res |> roc_auc(stroke, .pred_0) |> pull(`.estimate`), 3)))) +
+  ggtitle("Logistic regression") |
+  
+roc_curve(rf_res, stroke, .pred_0) |> # why .pred_0???
+  ggplot(aes(x = 1 - specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  theme_simple +
+  geom_text(aes(0.75, 0.25, label = paste0("AUC: ", round(rf_res |> roc_auc(stroke, .pred_0) |> pull(`.estimate`), 3)))) +
+  ggtitle("Random forest")
+
+ggsave("results/auc_all_models.png", h = 5, w = 8)
+
+combined_res <- 
+  svm_res |> 
+  select(.pred_1, stroke) |> 
+  mutate(model = "SVM") |> 
+  rownames_to_column("id") |>  
+  bind_rows(log_res |> 
+               select(.pred_1, stroke) |> 
+  mutate(model = "LR") |>
+  rownames_to_column("id")) |> 
+   bind_rows(rf_res |> 
+               select(.pred_1, stroke) |> 
+  mutate(model = "RF") |>
+  rownames_to_column("id") ) |> 
+  mutate(model = factor(model, levels = c("SVM", "LR", "RF"))) 
+
+probs <- 
+  combined_res|> 
+  mutate(stroke = recode(stroke,
+                         `1` = "Yes",
+                         `0` = "No")) |> 
+  ggplot(aes(stroke, .pred_1, color = stroke)) +
+  geom_quasirandom() +
+  geom_hline(yintercept = 0.5, lty = "dashed", color = "grey") +
+  geom_violin(fill = NA) +
+  stat_summary(fun = median, 
+               geom= "crossbar", 
+               color = "black",
+               width = 0.5) +
+  facet_wrap(~model, scales = "free_x") +
+  scale_color_manual(values  = c("grey", "#860051")) +
+  labs(y = "Probability stroke", x = "True class") +
+  theme_simple +
+  theme(legend.position = "top")
+
+cm_res <- 
+  svm_res %>% 
+  count(.pred_class, stroke) |> 
+  mutate(model = "SVM") |> 
+  bind_rows(log_res %>% 
+  count(.pred_class, stroke) |> 
+  mutate(model = "LR")) |>
+  bind_rows(rf_res %>% 
+  count(.pred_class, stroke) |> 
+  mutate(model = "RF"))
+
+
+cm <- 
+  cm_res |> 
+  mutate(model = factor(model, levels = c("SVM", "LR", "RF")),
+         .pred_class  = recode(.pred_class ,
+                         `1` = "Yes",
+                         `0` = "No"),
+         stroke  = recode(stroke ,
+                         `1` = "Yes",
+                         `0` = "No")) |>
+  rename(True_class = stroke,
+           Predicted_class = .pred_class) %>%
+    mutate(color = case_when(True_class == Predicted_class ~ "#C5E0B3",
+                             TRUE ~ "#FB8875")) %>% 
+    ggplot(aes(Predicted_class,True_class, label = n)) +
+    geom_tile(aes(fill = color), colour = "white") +
+    geom_text(aes(label = sprintf("%1.0f", n)), vjust = 1) +
+    scale_fill_identity() +
+  facet_wrap(~model) +
+  coord_fixed() +
+  theme_simple
+  
+probs | cm
+
+ggsave("results/prob_cm.png", h = 4, w = 9)
+
+ggsave("results/prob_cm.png", h = 6, w = 6)
+
+info <- 
+  combined_res |> 
+  mutate(stroke  = recode(stroke ,
+                         `1` = "Yes",
+                         `0` = "No")) |> 
+  group_by(id) |> 
+  mutate(type = case_when(.pred_1 > 0.5 & stroke == "No" ~ "Missclassified",
+                   .pred_1 < 0.5 & stroke == "Yes" ~ "Missclassified",
+                   T ~ "Correct")) |> 
+  group_by(id) |> 
+  filter(type == "Missclassified") |> 
+  summarise(n = n_distinct(model)) |> 
+  arrange(n) |> 
+  mutate(n = paste0("Missclassified by ", n))
+
+
+
+combined_res |> 
+  mutate(stroke  = recode(stroke ,
+                         `1` = "Yes",
+                         `0` = "No")) |>
+  left_join(info, by = "id") |>
+  mutate(n = ifelse(is.na(n), "Correctly classified", n)) |> 
+  ggplot(aes(model, .pred_1, group = id, color = n)) +
+  geom_point() +
+  geom_hline(yintercept = 0.5, lty = "dashed", color = "grey") +
+  geom_line(show.legend = F, alpha = 0.7) +
+  scale_color_manual(values  = c("grey",
+                                 "#EE8537",
+                                 "#CC2D30",
+                                 "#8F0415")) +
+  labs(y = "Probability stroke", x = "Model") +
+  facet_wrap(~stroke) +
+  theme_simple
+
+ggsave("results/missclassification.png", h = 5, w = 8)
+
+```
+
+## Feature importance
+
+```{r}
+svm_imp <- 
+  svm_importance |> 
+  ggplot(aes(fct_reorder(Variable, Importance), Importance)) +
+  geom_col() +
+  coord_flip() +
+  theme_main +
+  xlab("") +
+  ggtitle("SVM") 
+lr_imp <- 
+  log_importance |> 
+  ggplot(aes(fct_reorder(Variable, Importance), Importance)) +
+  geom_col() +
+  coord_flip() +
+  theme_main +
+  xlab("") +
+  ggtitle("LR") 
+rf_imp <- 
+  rf_importance |> 
+  ggplot(aes(fct_reorder(Variable, Importance), Importance)) +
+  geom_col() +
+  coord_flip() +
+  theme_main +
+  xlab("") +
+  ggtitle("RF")
+
+svm_imp| lr_imp | rf_imp
+
+ggsave("results/importances.png", h = 5, w = 13)
+```
+
+```{r}
+sessionInfo()
+```
+
+End of document.
